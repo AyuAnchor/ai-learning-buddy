@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 # Configuration
-API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyASORpjRoDsPkkFT4Tg3F_LKiwSZjweczA")
+API_KEY = os.environ.get("GEMINI_API_KEY")
 genai.configure(api_key=API_KEY)
 
 # Initialize session state variables
