@@ -2,12 +2,13 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import os
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 from typing import Set, List, Dict, Any
 from dotenv import load_dotenv
 from googlesearch import search
 import requests
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
 load_dotenv()
 # Configuration
@@ -33,6 +34,22 @@ if "answered_questions" not in st.session_state:
     st.session_state.answered_questions = {} # Store answers and results
 if "pdf_analysis_result" not in st.session_state:
     st.session_state.pdf_analysis_result = None
+
+# Gamification additions
+if "total_questions_solved" not in st.session_state:
+    st.session_state.total_questions_solved = 0
+if "total_correct_answers" not in st.session_state:
+    st.session_state.total_correct_answers = 0
+if "topics_covered" not in st.session_state:
+    st.session_state.topics_covered = set()
+if "current_streak" not in st.session_state:
+    st.session_state.current_streak = 0
+if "last_quiz_date" not in st.session_state:
+    st.session_state.last_quiz_date = None # To track consecutive days
+if "streak_history" not in st.session_state:
+    st.session_state.streak_history = {} # {date: True/False if quiz completed on that day}
+if "user_name" not in st.session_state:
+    st.session_state.user_name = "" # For personalization
 
 def initialize_chat():
     """Initialize the Gemini chat model."""
@@ -106,7 +123,7 @@ def generate_quiz(topic: str, difficulty: str, num_questions: int) -> List[Dict[
     Generate a quiz on the topic "{topic}" for a student who is preparing for Joint Entrance Exam (JEE).
     The desired difficulty level is "{difficulty}".
     The quiz should have {num_questions} single choice questions.
-    Pick the questions from existing previous year questions (PYQs) available for JEE Exam Everytime even if it causes the difficulty level to be changed.
+    Pick the questions from existing previous year questions (PYQs) available for JEE Exam when possible.
     
     For each question, provide 4 answer choices, the correct answer (as a 0-indexed integer), and a detailed explanation.
     
@@ -184,28 +201,20 @@ def get_solution_link(jee_question, num_results=10):
     """
     query = f"{jee_question} JEE solution site:byjus.com OR site:unacademy.com OR site:toppr.com OR site:vedantu.com OR site:mathongo.com"
     
-    # print(f"Searching Google for: {query}") # This can be noisy in Streamlit logs, uncomment for debugging
-    
     try:
         for url in search(query, num_results=num_results):
             try:
-                # Fetch the page content
                 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
                 response = requests.get(url, headers=headers, timeout=7) # Increased timeout slightly
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
-                    # Check for keywords indicating it's a solution page
                     if any(kw in soup.get_text().lower() for kw in ["solution", "answer", "explanation", "jee"]):
-                        # print(f"Found likely solution page: {url}") # Uncomment for debugging
                         return url
             except requests.exceptions.Timeout:
-                # print(f"Request to {url} timed out.") # Uncomment for debugging
                 continue
             except requests.exceptions.RequestException as req_e:
-                # print(f"Request error for {url}: {req_e}") # Uncomment for debugging
                 continue
             except Exception as e:
-                # print(f"Error processing {url}: {e}") # Uncomment for debugging
                 continue
     except Exception as google_e:
         st.warning(f"Could not perform web search for solution: {google_e}. This might be due to rate limits or network issues with the `googlesearch` library.")
@@ -251,7 +260,7 @@ def analyze_test_results(text):
         }}
         // ... more questions
       ],
-      "summary": "Imagine you are a teacher for JEE Exams, give Detailed overall analysis of student performance and recommendations. Highlight areas for improvement and suggest actions. "
+      "summary": "Brief overall analysis of student performance and recommendations. Highlight areas for improvement and suggest actions."
     }}
     
     Infer the topics from the questions themselves.
@@ -332,7 +341,7 @@ def display_quiz_generator():
         with col1:
             difficulty = st.selectbox(
                 "Select difficulty:",
-                ("Easy", "Medium","Hard"),
+                ("JEE Mains", "JEE Advanced"),
                 index=1, 
                 key="quiz_difficulty_select"
             )
@@ -357,6 +366,8 @@ def display_quiz_generator():
                 st.session_state.current_question = 0
                 st.session_state.score = 0
                 st.session_state.answered_questions = {} 
+                # Add topic to topics covered
+                st.session_state.topics_covered.add(topic)
                 st.success("Quiz generated successfully! Let's begin.")
                 st.rerun()
             else:
@@ -381,6 +392,25 @@ def display_quiz():
         st.balloons()
         st.success(f"🎉 Quiz Completed! Your score: {st.session_state.score}/{len(questions)} 🎉")
         
+        # Update streak history for today
+        today = datetime.now().date()
+        st.session_state.streak_history[today.isoformat()] = True
+
+        # Calculate streak
+        if st.session_state.last_quiz_date:
+            # Check if today is the day after the last quiz date
+            if today == st.session_state.last_quiz_date + timedelta(days=1):
+                st.session_state.current_streak += 1
+            # Check if it's the same day (don't break streak if multiple quizzes today)
+            elif today == st.session_state.last_quiz_date:
+                pass # Streak remains the same, already logged for today
+            else:
+                st.session_state.current_streak = 1 # Reset if not consecutive
+        else:
+            st.session_state.current_streak = 1 # First quiz completed
+
+        st.session_state.last_quiz_date = today
+
         st.write("### Review Your Answers:")
         for i, q_data in enumerate(questions):
             user_answer_idx = st.session_state.answered_questions.get(i, {}).get("selected_idx")
@@ -449,7 +479,7 @@ def display_quiz():
             st.error(f"You answered: Incorrect. Correct answer: {question['answers'][question['correctAnswer']]}")
         
         # ✅ This is where get_solution_link is always called for textual solutions
-        with st.spinner("Searching for solution..."):
+        with st.spinner("Searching for textual solution..."):
             txt_link = get_solution_link(question['question'])
 
         explanation_obj = question.get("explanation", {})
@@ -492,8 +522,10 @@ def display_quiz():
                 "is_correct": is_correct
             }
 
+            st.session_state.total_questions_solved += 1
             if is_correct:
                 st.session_state.score += 1
+                st.session_state.total_correct_answers += 1
             st.rerun() 
 
 def display_pdf_analyzer():
@@ -512,6 +544,15 @@ def display_pdf_analyzer():
                     analysis_result = analyze_test_results(extracted_text)
                     if analysis_result:
                         st.session_state.pdf_analysis_result = analysis_result
+                        
+                        # Update gamification data from PDF analysis
+                        if analysis_result.get("analysis", {}).get("total_questions") != "not determinable":
+                            st.session_state.total_questions_solved += analysis_result["analysis"]["total_questions"]
+                        if analysis_result.get("analysis", {}).get("correct_answers") != "not determinable":
+                            st.session_state.total_correct_answers += analysis_result["analysis"]["correct_answers"]
+                        if analysis_result.get("weak_topics"):
+                            st.session_state.topics_covered.update(analysis_result["weak_topics"])
+
                         st.success("Analysis completed successfully!")
                         st.rerun() 
                     else:
@@ -559,13 +600,151 @@ def display_pdf_analyzer():
             else:
                 st.write("No detailed question analysis available or could not be parsed.")
 
+def display_profile():
+    """Display the user profile with gamification stats."""
+    st.subheader("👤 Your Study Profile")
+
+    # Personalization greeting
+    if st.session_state.user_name:
+        st.write(f"### Hello, {st.session_state.user_name}! 👋")
+    else:
+        st.write("### Welcome to your Study Profile! 👋")
+        with st.form("name_form"):
+            user_input_name = st.text_input("What's your name?", key="name_input")
+            if st.form_submit_button("Set Name"):
+                if user_input_name:
+                    st.session_state.user_name = user_input_name
+                    st.success(f"Name set to {user_input_name}!")
+                    st.rerun()
+                else:
+                    st.warning("Please enter a name.")
+        st.markdown("---") # Add a separator if the name input is shown
+
+    total_q_solved = st.session_state.total_questions_solved
+    total_corr_ans = st.session_state.total_correct_answers
+    accuracy = (total_corr_ans / total_q_solved * 100) if total_q_solved > 0 else 0
+
+    st.markdown("---")
+    st.markdown("### 📈 Overall Performance")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Questions Solved", total_q_solved)
+    with col2:
+        st.metric("Accuracy", f"{accuracy:.2f}%")
+    with col3:
+        st.metric("Current Streak", f"{st.session_state.current_streak} days 🔥")
+
+    st.markdown("---")
+    st.markdown("### 📚 Topics Covered")
+    if st.session_state.topics_covered:
+        topics_list = sorted(list(st.session_state.topics_covered))
+        st.write(", ".join(topics_list))
+    else:
+        st.write("Start solving quizzes or analyzing tests to see topics you've covered!")
+
+    st.markdown("---")
+    st.markdown("### 🔥 Quiz Streak Chart")
+    st.write("🟢: Quiz completed | ⚪: No quiz")
+    
+    # Generate data for the streak chart (similar to GitHub's contribution graph)
+    today = datetime.now().date()
+    
+    # Get dates for the last 365 days (a year's worth, similar to GitHub)
+    num_days = 90 # Or 90 for a quarter, etc.
+    dates_to_display = []
+    for i in range(num_days):
+        dates_to_display.append(today - timedelta(days=num_days - 1 - i))
+
+    # Determine the number of columns (weeks) for the chart
+    # A standard GitHub chart has 7 rows (days of the week)
+    
+    # We need to arrange `num_days` into a grid.
+    # Start with the day of the week for the first date to align columns.
+    first_date_in_chart = dates_to_display[0]
+    first_day_of_week = first_date_in_chart.weekday() # Monday is 0, Sunday is 6
+
+    # Prepare the grid. 7 rows for days of the week.
+    # Fill in leading empty cells if the first day isn't a Monday in the chart's first column.
+    chart_grid = [[] for _ in range(7)] # 7 lists for 7 days of the week (rows)
+
+    # Add placeholders for days before the first day of the week for the first date
+    for i in range(7):
+        if i < first_day_of_week:
+            chart_grid[i].append(" ") # Empty cell for alignment
+        else:
+            break # Stop filling placeholders once we hit the starting day
+
+    for date in dates_to_display:
+        day_of_week = date.weekday() # 0=Monday, 6=Sunday
+        date_str = date.isoformat()
+        
+        symbol = "🟢" if st.session_state.streak_history.get(date_str, False) else "⚪"
+        chart_grid[day_of_week].append(symbol)
+
+    # Pad the last week's rows if they don't end on a Sunday
+    max_len = max(len(row) for row in chart_grid)
+    for i in range(7):
+        while len(chart_grid[i]) < max_len:
+            chart_grid[i].append(" ") # Pad with spaces
+
+    # Render the chart using columns for weeks
+    st.markdown("---")
+    st.markdown("#### Sessions in last 3 Months")
+    
+    # Display column headers (months, if desired, but harder to align precisely)
+    # For simplicity, we'll focus on the grid itself.
+
+    # Display the grid
+    # Transpose the grid for column-major display (week by week)
+    # Each column will represent a "week" or partial week.
+    
+    # Calculate number of weeks (columns)
+    num_weeks = max_len
+    
+    # Create a single row for the weekday labels
+    weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    
+    # Create columns to simulate the GitHub graph
+    cols = st.columns(num_weeks)
+    
+    for week_idx in range(num_weeks):
+        with cols[week_idx]:
+            # Optional: Add month label for first day of month in this column
+            if week_idx == 0:
+                 st.write(" ") # Placeholder for alignment or month
+            
+            for day_idx in range(7):
+                if week_idx < len(chart_grid[day_idx]): # Ensure index is valid
+                    st.markdown(f"<div style='font-size: 1.5em; text-align: center; margin: 0px;'>{chart_grid[day_idx][week_idx]}</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div style='font-size: 1.5em; text-align: center; margin: 0px;'> </div>", unsafe_allow_html=True)
+
+    # Optional: Display weekday labels on the left (needs more complex layout)
+    # For now, let's just make the squares a bit bigger and use the labels above.
+    st.markdown("---")
+    st.write(f"Your longest streak: **{st.session_state.current_streak} days** (Note: this is the *current* streak, not the historical longest)")
+
+
 def main():
     """Main application function."""
     st.set_page_config(page_title="JEE Study Buddy", layout="wide")
     st.title("🚀 JEE Study Buddy")
     
+    # Personalization prompt if name is not set
+    if not st.session_state.user_name:
+        st.info("Welcome to your JEE Study Buddy! What should I call you?")
+        user_input_name = st.text_input("Your Name:", key="initial_name_input")
+        if st.button("Start My Journey"):
+            if user_input_name:
+                st.session_state.user_name = user_input_name
+                st.success(f"Great, {user_input_name}! Let's get started.")
+                st.rerun()
+            else:
+                st.warning("Please enter your name to begin.")
+        st.stop() # Stop execution until name is set
+
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Chat", "Quiz Generator", "Test Results Analyzer"])
+    page = st.sidebar.radio("Go to", ["Chat", "Quiz Generator", "Test Results Analyzer", "Profile"])
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🧠 Identified Weak Topics")
@@ -594,6 +773,14 @@ def main():
         st.session_state.score = 0
         st.session_state.answered_questions = {}
         st.session_state.pdf_analysis_result = None
+        # Reset gamification specific keys
+        st.session_state.total_questions_solved = 0
+        st.session_state.total_correct_answers = 0
+        st.session_state.topics_covered = set()
+        st.session_state.current_streak = 0
+        st.session_state.last_quiz_date = None
+        st.session_state.streak_history = {}
+        st.session_state.user_name = "" # Clear user name too
         st.success("All application data cleared! Restarting...")
         st.rerun()
 
@@ -606,6 +793,8 @@ def main():
             display_quiz_generator()
     elif page == "Test Results Analyzer":
         display_pdf_analyzer()
+    elif page == "Profile":
+        display_profile()
 
 if __name__ == "__main__":
     main()
