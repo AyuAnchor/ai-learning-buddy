@@ -478,7 +478,8 @@ def display_quiz():
 
     if current_q_idx >= len(questions):
         st.balloons()
-        st.success(f"🎉 Quiz Completed! Your score: {st.session_state.score}/{len(questions)} 🎉")
+        x= st.session_state.score / len(questions) * 100
+        st.success(f"🎉 Quiz Completed! Your score: {x}% 🎉")
         
         # Update streak history for today
         today = datetime.now().date()
@@ -586,7 +587,54 @@ def display_quiz():
                     ]
                 st.rerun()
         
-        if is_skipped:
+        # The key issue starts here - need to handle the bookmarked-only case
+        if "selected_idx" not in answer_info and not is_skipped:
+            # This case handles when only bookmarked (no submit/skip yet)
+            options = question["answers"]
+            selected_option = st.radio(
+                "Select your answer:",
+                options,
+                key=f"q_{current_q_idx}_options"
+            )
+
+            col_submit, col_skip = st.columns([1, 1])
+            
+            with col_submit:
+                if st.button("Submit Answer", key=f"submit_q_{current_q_idx}_after_bookmark"):
+                    selected_idx = options.index(selected_option)
+                    is_correct = (selected_idx == question["correctAnswer"])
+                    
+                    answer_info["selected_idx"] = selected_idx
+                    answer_info["is_correct"] = is_correct
+                    answer_info["is_skipped"] = False
+                    st.session_state.answered_questions[current_q_idx] = answer_info
+
+                    st.session_state.total_questions_solved += 1
+                    if is_correct:
+                        st.session_state.score += 1
+                        st.session_state.total_correct_answers += 1
+
+                    # Update topic-specific performance from quiz
+                    quiz_main_topic = st.session_state.get("current_quiz_main_topic", "General") 
+                    if quiz_main_topic not in st.session_state.topic_performance:
+                        st.session_state.topic_performance[quiz_main_topic] = {"total_solved": 0, "correct_solved": 0}
+                    
+                    st.session_state.topic_performance[quiz_main_topic]["total_solved"] += 1
+                    if is_correct:
+                        st.session_state.topic_performance[quiz_main_topic]["correct_solved"] += 1
+
+                    st.rerun()
+            
+            with col_skip:
+                if st.button("Skip Question", key=f"skip_q_{current_q_idx}_after_bookmark"):
+                    answer_info["selected_idx"] = None
+                    answer_info["is_correct"] = False
+                    answer_info["is_skipped"] = True
+                    st.session_state.answered_questions[current_q_idx] = answer_info
+                    st.session_state.current_question += 1
+                    st.rerun()
+                    
+        elif is_skipped:
             st.info("You skipped this question.")
             # Options are disabled as no answer was selected
             st.radio(
@@ -610,31 +658,32 @@ def display_quiz():
             else:
                 st.error(f"You answered: Incorrect. Correct answer: {question['answers'][question['correctAnswer']]}")
         
-        with st.spinner("Searching for textual solution..."):
-            txt_link = get_solution_link(question['question'])
+        # Only show explanation if question was answered or skipped
+        if "selected_idx" in answer_info or is_skipped:
+            with st.spinner("Searching for textual solution..."):
+                txt_link = get_solution_link(question['question'])
 
-        explanation_obj = question.get("explanation", {})
-        if isinstance(explanation_obj, dict):
-            detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
-            st.info(f"**Teacher's Explanation:**\n{detailed_steps}")
+            explanation_obj = question.get("explanation", {})
+            if isinstance(explanation_obj, dict):
+                detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
+                st.info(f"**Teacher's Explanation:**\n{detailed_steps}")
 
-            yt_link = explanation_obj.get("youtube_link")
-            if yt_link and yt_link.strip().lower() not in ["", "null"]:
-                st.markdown(f"[📺 Watch on YouTube]({yt_link})")
-            else:
-                st.info("No YouTube video link provided by the AI.")
-            
-            if txt_link:
-                st.markdown(f"[📖 View Textual Solution]({txt_link})")
-            else:
-                st.info("Could not find a textual solution link online for this question.")
-
-        else: 
-             st.info(f"**Explanation:**\n{explanation_obj}")
+                yt_link = explanation_obj.get("youtube_link")
+                if yt_link and yt_link.strip().lower() not in ["", "null"]:
+                    st.markdown(f"[📺 Watch on YouTube]({yt_link})")
+                else:
+                    st.info("No YouTube video link provided by the AI.")
+                
+                if txt_link:
+                    st.markdown(f"[📖 View Textual Solution]({txt_link})")
+                else:
+                    st.info("Could not find a textual solution link online for this question.")
+            else: 
+                st.info(f"**Explanation:**\n{explanation_obj}")
         
-        if st.button("Next Question", key=f"next_q_{current_q_idx}"):
-            st.session_state.current_question += 1
-            st.rerun()
+            if st.button("Next Question", key=f"next_q_{current_q_idx}"):
+                st.session_state.current_question += 1
+                st.rerun()
     else:
         options = question["answers"]
         selected_option = st.radio(
