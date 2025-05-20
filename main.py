@@ -2,10 +2,13 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import os
+import fitz  # PyMuPDF
 from typing import Set, List, Dict, Any
+from dotenv import load_dotenv
 
+load_dotenv()
 # Configuration
-API_KEY = "your_api_key"
+API_KEY = os.environ.get("GEMINI_API_KEY", "your_api_key_here")
 genai.configure(api_key=API_KEY)
 
 # Initialize session state variables
@@ -25,6 +28,8 @@ if "score" not in st.session_state:
     st.session_state.score = 0
 if "answered_questions" not in st.session_state:
     st.session_state.answered_questions = set()
+if "pdf_analysis_result" not in st.session_state:
+    st.session_state.pdf_analysis_result = None
 
 def initialize_chat():
     """Initialize the Gemini chat model."""
@@ -33,17 +38,14 @@ def initialize_chat():
     return chat
 
 def process_message(message: str) -> Set[str]:
-    """
-    Process a user message to identify weak topics.
-    Returns a set of identified weak topics.
-    """
+    """Process a user message to identify weak topics."""
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     From the following student message, identify any weak topics or subjects the student might be struggling with.
     If there are weak topics, respond with the list of topics separated by a single space.
     If no weak topics are found, respond with "none".
-    Specifically create the topic keeping the jee syllabus in mind.
+    
     Message: "{message}"
     """
     
@@ -57,7 +59,6 @@ def process_message(message: str) -> Set[str]:
         if text == "none":
             return set()
         
-        # Split topics by spaces and add to the set
         new_topics = set(text.split())
         return new_topics
     
@@ -83,9 +84,7 @@ def get_chatbot_response(message: str) -> str:
     try:
         response = st.session_state.chat.send_message(prompt)
         
-        # Process the message to identify weak topics
         new_topics = process_message(message)
-        # Update the set of weak topics
         st.session_state.weak_topics.update(new_topics)
         
         return response.text
@@ -120,7 +119,7 @@ def generate_quiz(topic: str) -> List[Dict[str, Any]]:
     Ensure all questions are appropriate for JEE level.
     Return ONLY valid JSON with no additional text.
     """
-    print(prompt)
+    
     try:
         response = model.generate_content(
             prompt,
@@ -129,7 +128,6 @@ def generate_quiz(topic: str) -> List[Dict[str, Any]]:
         
         response_text = response.text
         
-        # Extract JSON from response
         json_start = response_text.find("[")
         json_end = response_text.rfind("]") + 1
         
@@ -144,6 +142,86 @@ def generate_quiz(topic: str) -> List[Dict[str, Any]]:
     except Exception as e:
         st.error(f"Error generating quiz: {str(e)}")
         return []
+
+def extract_text_from_pdf(pdf_file):
+    """Extract text from uploaded PDF file."""
+    try:
+        text = ""
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        for page in doc:
+            text += page.get_text()
+        return text.strip()
+    except Exception as e:
+        st.error(f"Error extracting text from PDF: {str(e)}")
+        return ""
+
+def analyze_test_results(text):
+    """Analyze PDF test results to identify questions, student answers, correct answers, and determine weak topics based on incorrect answers."""
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    You are analyzing a student's test results for JEE preparation. The PDF contains questions, 
+    student's answers, and correct answers in the following format:
+    
+    ->question
+    ->answer by student
+    ->correct answer
+    
+    Here is the extracted content from the test result:
+    {text}
+    
+    Please analyze and respond with the following JSON structure:
+    {{
+      "weak_topics": ["topic1", "topic2", ...],
+      "analysis": {{
+        "total_questions": number,
+        "correct_answers": number,
+        "incorrect_answers": number,
+        "accuracy_percentage": number
+      }},
+      "question_analysis": [
+        {{
+          "question": "Question text",
+          "student_answer": "Student's answer",
+          "correct_answer": "Correct answer",
+          "is_correct": boolean,
+          "topic": "Related topic",
+          "explanation": "Brief explanation of why the answer is correct/incorrect and what concept the student needs to focus on"
+        }},
+        ...
+      ],
+      "summary": "Brief overall analysis of student performance and recommendations"
+    }}
+    
+    Return ONLY valid JSON with no additional text.
+    """
+    
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.2}
+        )
+        
+        response_text = response.text
+        
+        json_start = response_text.find("{")
+        json_end = response_text.rfind("}") + 1
+        
+        if json_start >= 0 and json_end > json_start:
+            json_text = response_text[json_start:json_end]
+            analysis_result = json.loads(json_text)
+            
+            if "weak_topics" in analysis_result:
+                st.session_state.weak_topics.update(analysis_result["weak_topics"])
+                
+            return analysis_result
+        else:
+            st.error("Failed to parse analysis data")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error analyzing test results: {str(e)}")
+        return None
 
 def display_chat():
     """Display the chat interface."""
@@ -184,7 +262,7 @@ def display_quiz_generator():
         for topic in st.session_state.weak_topics:
             st.write(f"- {topic}")
     else:
-        st.write("No weak topics identified yet. Chat more to help us understand your needs.")
+        st.write("No weak topics identified yet. Chat more or upload test results to help us understand your needs.")
     
     # Quiz generation form
     with st.form("quiz_form"):
@@ -197,6 +275,7 @@ def display_quiz_generator():
             st.session_state.current_question = 0
             st.session_state.score = 0
             st.session_state.answered_questions = set()
+            st.success("Quiz generated successfully!")
             st.rerun()
 
 def display_quiz():
@@ -262,13 +341,73 @@ def display_quiz():
             st.session_state.current_question += 1
             st.rerun()
 
+def display_pdf_analyzer():
+    """Display the PDF test results analyzer interface."""
+    st.subheader("Analyze Test Results")
+    
+    # File uploader for PDF
+    uploaded_file = st.file_uploader("Upload your test result (PDF)", type=["pdf"])
+    
+    if uploaded_file:
+        if st.button("Analyze Test Results"):
+            with st.spinner("Extracting and analyzing test results..."):
+                extracted_text = extract_text_from_pdf(uploaded_file)
+                if not extracted_text:
+                    st.error("Could not extract text. Please upload a clear PDF.")
+                else:
+                    analysis_result = analyze_test_results(extracted_text)
+                    if analysis_result:
+                        st.session_state.pdf_analysis_result = analysis_result
+                        st.success("Analysis completed successfully!")
+                        st.rerun()
+    
+    # Display analysis results if available
+    if st.session_state.pdf_analysis_result:
+        result = st.session_state.pdf_analysis_result
+        
+        # Display summary stats
+        st.markdown("### 📊 Test Analysis Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Questions", result["analysis"]["total_questions"])
+        with col2:
+            st.metric("Correct Answers", result["analysis"]["correct_answers"])
+        with col3:
+            st.metric("Incorrect Answers", result["analysis"]["incorrect_answers"])
+        with col4:
+            st.metric("Accuracy", f"{result['analysis']['accuracy_percentage']}%")
+        
+        # Display weak topics
+        st.markdown("### 🔍 Identified Weak Topics")
+        if result["weak_topics"]:
+            for topic in result["weak_topics"]:
+                st.write(f"- {topic}")
+        else:
+            st.write("No significant weak topics identified.")
+        
+        # Display overall summary
+        st.markdown("### 📝 Performance Summary")
+        st.write(result["summary"])
+        
+        # Display detailed question analysis
+        with st.expander("Detailed Question Analysis"):
+            for i, q_analysis in enumerate(result["question_analysis"]):
+                status = "✅" if q_analysis["is_correct"] else "❌"
+                st.markdown(f"**Question {i+1}**: {status}")
+                st.write(f"**Q**: {q_analysis['question']}")
+                st.write(f"**Your Answer**: {q_analysis['student_answer']}")
+                st.write(f"**Correct Answer**: {q_analysis['correct_answer']}")
+                st.write(f"**Topic**: {q_analysis['topic']}")
+                st.write(f"**Explanation**: {q_analysis['explanation']}")
+                st.markdown("---")
+
 def main():
     """Main application function."""
     st.title("JEE Study Buddy")
     
     # Sidebar navigation
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Chat", "Quiz Generator"])
+    page = st.sidebar.radio("Go to", ["Chat", "Quiz Generator", "Test Results Analyzer"])
     
     if page == "Chat":
         display_chat()
@@ -277,6 +416,8 @@ def main():
             display_quiz()
         else:
             display_quiz_generator()
+    elif page == "Test Results Analyzer":
+        display_pdf_analyzer()
     
     # Show weak topics in sidebar
     with st.sidebar.expander("Identified Weak Topics"):
@@ -293,6 +434,8 @@ def main():
         st.session_state.weak_topics = set()
         st.session_state.quiz_questions = []
         st.session_state.showing_quiz = False
+        st.session_state.pdf_analysis_result = None
+        st.success("All data cleared!")
         st.rerun()
 
 if __name__ == "__main__":
