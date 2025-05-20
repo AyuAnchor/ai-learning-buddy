@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import os
-import fitz # PyMuPDF
+import fitz 
 from typing import Set, List, Dict, Any
 from dotenv import load_dotenv
 from googlesearch import search
@@ -50,6 +50,13 @@ if "streak_history" not in st.session_state:
     st.session_state.streak_history = {} # {date: True/False if quiz completed on that day}
 if "user_name" not in st.session_state:
     st.session_state.user_name = "" # For personalization
+
+# New: For topic-specific performance tracking
+if "topic_performance" not in st.session_state:
+    st.session_state.topic_performance = {} # {topic: {"total_solved": int, "correct_solved": int}}
+if "current_quiz_main_topic" not in st.session_state: # To store the topic of the currently active quiz
+    st.session_state.current_quiz_main_topic = ""
+
 
 def initialize_chat():
     """Initialize the Gemini chat model."""
@@ -122,10 +129,15 @@ def generate_quiz(topic: str, difficulty: str, num_questions: int) -> List[Dict[
     prompt = f"""
     Generate a quiz on the topic "{topic}" for a student who is preparing for Joint Entrance Exam (JEE).
     The desired difficulty level is "{difficulty}".
-    The quiz should have {num_questions} single choice questions.
+    The quiz should have exactly {num_questions} single choice questions.
     Pick the questions from existing previous year questions (PYQs) available for JEE Exam when possible.
     
     For each question, provide 4 answer choices, the correct answer (as a 0-indexed integer), and a detailed explanation.
+    
+    
+    ❗ Important formatting rules:
+    1. Use plain text with Unicode superscripts/subscripts (e.g. n², 2ⁿ, H₂O).  
+    2. Do **not** use any HTML tags (`<sup>`, `<sub>`) or LaTeX.  
     
     The explanation should be structured as an object with the following fields:
     "detailed_steps": "Explain the solution in a step-by-step manner, as a JEE teacher would. Break down the problem, mention key formulas or concepts, and guide the student through the solution process. Use markdown for formatting, such as bullet points for steps, bold text for important terms or formulas, and ensure clear separation between steps for readability. Be thorough.",
@@ -350,7 +362,7 @@ def display_quiz_generator():
                 "Number of questions:",
                 min_value=1,
                 max_value=20, 
-                value=5,      
+                value=1,      
                 step=1,
                 key="quiz_num_questions_input"
             )
@@ -368,6 +380,8 @@ def display_quiz_generator():
                 st.session_state.answered_questions = {} 
                 # Add topic to topics covered
                 st.session_state.topics_covered.add(topic)
+                # Store the main topic of the quiz
+                st.session_state.current_quiz_main_topic = topic
                 st.success("Quiz generated successfully! Let's begin.")
                 st.rerun()
             else:
@@ -526,6 +540,16 @@ def display_quiz():
             if is_correct:
                 st.session_state.score += 1
                 st.session_state.total_correct_answers += 1
+
+            # Update topic-specific performance from quiz
+            quiz_main_topic = st.session_state.get("current_quiz_main_topic", "General") 
+            if quiz_main_topic not in st.session_state.topic_performance:
+                st.session_state.topic_performance[quiz_main_topic] = {"total_solved": 0, "correct_solved": 0}
+            
+            st.session_state.topic_performance[quiz_main_topic]["total_solved"] += 1
+            if is_correct:
+                st.session_state.topic_performance[quiz_main_topic]["correct_solved"] += 1
+
             st.rerun() 
 
 def display_pdf_analyzer():
@@ -550,8 +574,24 @@ def display_pdf_analyzer():
                             st.session_state.total_questions_solved += analysis_result["analysis"]["total_questions"]
                         if analysis_result.get("analysis", {}).get("correct_answers") != "not determinable":
                             st.session_state.total_correct_answers += analysis_result["analysis"]["correct_answers"]
+                        
+                        # Update topic-specific performance from PDF analysis
+                        question_analysis_list = analysis_result.get("question_analysis", [])
+                        for q_analysis in question_analysis_list:
+                            topic = q_analysis.get("topic")
+                            is_correct = q_analysis.get("is_correct")
+
+                            if topic and isinstance(topic, str): 
+                                if topic not in st.session_state.topic_performance:
+                                    st.session_state.topic_performance[topic] = {"total_solved": 0, "correct_solved": 0}
+                                
+                                st.session_state.topic_performance[topic]["total_solved"] += 1
+                                if is_correct:
+                                    st.session_state.topic_performance[topic]["correct_solved"] += 1
+
                         if analysis_result.get("weak_topics"):
                             st.session_state.topics_covered.update(analysis_result["weak_topics"])
+
 
                         st.success("Analysis completed successfully!")
                         st.rerun() 
@@ -635,12 +675,64 @@ def display_profile():
         st.metric("Current Streak", f"{st.session_state.current_streak} days 🔥")
 
     st.markdown("---")
-    st.markdown("### 📚 Topics Covered")
+    st.markdown("### 📚 Topics Covered and Performance")
     if st.session_state.topics_covered:
+        # Get a sorted list of topics to display consistently
         topics_list = sorted(list(st.session_state.topics_covered))
-        st.write(", ".join(topics_list))
+        
+        # Start a container for the tags to allow for horizontal wrapping
+        st.markdown('<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">', unsafe_allow_html=True)
+        
+        for topic in topics_list:
+            performance = st.session_state.topic_performance.get(topic, {"total_solved": 0, "correct_solved": 0})
+            total = performance["total_solved"]
+            correct = performance["correct_solved"]
+            
+            percentage = (correct / total * 100) if total > 0 else 0
+
+            color = "var(--text-color)" # Default for no questions solved, adapting to theme
+            if total > 0:
+                if percentage >= 75: # Green for great accuracy
+                    color = "green"
+                elif percentage >= 50: # Orange for medium accuracy (better visibility)
+                    color = "orange" 
+                else: # Red for bad accuracy
+                    color = "red"
+            
+            # HTML for the compact tag
+            tag_html = f"""
+            <div style="
+                background-color: var(--secondary-background-color); /* Matches Streamlit's secondary background */
+                border-radius: 20px; /* Rounded corners like a button/tag */
+                padding: 8px 15px; /* Padding inside the tag */
+                display: flex;
+                align-items: center; /* Vertically center content */
+                font-size: 0.9em;
+                color: var(--text-color);
+                box-shadow: 1px 1px 3px rgba(0,0,0,0.2); /* Subtle shadow */
+                min-width: 120px; /* Ensure a minimum width */
+                justify-content: center; /* Center content horizontally if min-width is larger */
+                margin-right: 10px; /* Spacing between tags */
+                margin-bottom: 10px; /* Spacing for wrapping */
+            ">
+                <div style="
+                    width: 12px; 
+                    height: 12px; 
+                    border-radius: 50%; 
+                    background-color: {color}; 
+                    display: inline-block; 
+                    vertical-align: middle;
+                    margin-right: 8px; /* Space between circle and text */
+                "></div>
+                <strong>{topic}</strong>: {percentage:.1f}%
+            </div>
+            """
+            st.markdown(tag_html, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True) # Close the container div
+
     else:
         st.write("Start solving quizzes or analyzing tests to see topics you've covered!")
+
 
     st.markdown("---")
     st.markdown("### 🔥 Quiz Streak Chart")
@@ -689,38 +781,37 @@ def display_profile():
 
     # Render the chart using columns for weeks
     st.markdown("---")
-    st.markdown("#### Sessions in last 3 Months")
-    
-    # Display column headers (months, if desired, but harder to align precisely)
-    # For simplicity, we'll focus on the grid itself.
-
-    # Display the grid
-    # Transpose the grid for column-major display (week by week)
-    # Each column will represent a "week" or partial week.
-    
-    # Calculate number of weeks (columns)
-    num_weeks = max_len
+    st.markdown("#### Contributions in last year")
     
     # Create a single row for the weekday labels
     weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     
-    # Create columns to simulate the GitHub graph
-    cols = st.columns(num_weeks)
+    # Calculate number of weeks (columns)
+    num_weeks = max_len
     
+    # Create columns to simulate the GitHub graph
+    # Add an extra column at the beginning for weekday labels
+    cols = st.columns([0.5] + [1] * num_weeks) 
+    
+    with cols[0]: # First column for weekday labels
+        st.markdown("<br>", unsafe_allow_html=True) # Spacer
+        for label in weekday_labels:
+            st.markdown(f"<div style='height: 40px; display: flex; align-items: center;'>{label}</div>", unsafe_allow_html=True)
+
+
     for week_idx in range(num_weeks):
-        with cols[week_idx]:
+        with cols[week_idx + 1]: # Shift by 1 because the first column is for labels
             # Optional: Add month label for first day of month in this column
-            if week_idx == 0:
-                 st.write(" ") # Placeholder for alignment or month
-            
+            # This is complex to do accurately for all weeks and months
+            # For simplicity, we'll omit explicit month labels for now.
+            st.write(" ") # Placeholder for alignment or month
+
             for day_idx in range(7):
                 if week_idx < len(chart_grid[day_idx]): # Ensure index is valid
                     st.markdown(f"<div style='font-size: 1.5em; text-align: center; margin: 0px;'>{chart_grid[day_idx][week_idx]}</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"<div style='font-size: 1.5em; text-align: center; margin: 0px;'> </div>", unsafe_allow_html=True)
 
-    # Optional: Display weekday labels on the left (needs more complex layout)
-    # For now, let's just make the squares a bit bigger and use the labels above.
     st.markdown("---")
     st.write(f"Your longest streak: **{st.session_state.current_streak} days** (Note: this is the *current* streak, not the historical longest)")
 
@@ -781,6 +872,8 @@ def main():
         st.session_state.last_quiz_date = None
         st.session_state.streak_history = {}
         st.session_state.user_name = "" # Clear user name too
+        st.session_state.topic_performance = {} # Clear topic performance too
+        st.session_state.current_quiz_main_topic = "" # Clear current quiz topic
         st.success("All application data cleared! Restarting...")
         st.rerun()
 
