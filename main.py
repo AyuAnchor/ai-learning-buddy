@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import os
-import fitz 
+import fitz # PyMuPDF
 from typing import Set, List, Dict, Any
 from dotenv import load_dotenv
 from googlesearch import search
@@ -427,18 +427,23 @@ def display_quiz():
 
         st.write("### Review Your Answers:")
         for i, q_data in enumerate(questions):
-            user_answer_idx = st.session_state.answered_questions.get(i, {}).get("selected_idx")
-            is_correct = st.session_state.answered_questions.get(i, {}).get("is_correct", False)
+            answer_info = st.session_state.answered_questions.get(i, {})
+            user_answer_idx = answer_info.get("selected_idx")
+            is_correct = answer_info.get("is_correct", False)
+            is_skipped = answer_info.get("is_skipped", False) # New: Check if skipped
             
             st.markdown(f"--- \n**Question {i+1}:**")
             st.markdown(q_data['question']) # Display question using markdown
-            if user_answer_idx is not None:
+            
+            if is_skipped:
+                st.write("You skipped this question.")
+            elif user_answer_idx is not None:
                 st.write(f"Your answer: {q_data['answers'][user_answer_idx]} ({'Correct' if is_correct else 'Incorrect'})")
             else:
-                st.write("You did not answer this question.")
+                st.write("You did not answer this question.") # Fallback, should ideally not happen if handled correctly
+            
             st.write(f"Correct answer: {q_data['answers'][q_data['correctAnswer']]}")
 
-            # ✅ This is where get_solution_link is always called for textual solutions
             with st.spinner("Searching for solution..."):
                 txt_link = get_solution_link(q_data['question'])
 
@@ -478,29 +483,39 @@ def display_quiz():
 
     if current_q_idx in st.session_state.answered_questions:
         answer_info = st.session_state.answered_questions[current_q_idx]
+        is_skipped = answer_info.get("is_skipped", False) # New: Check if skipped
         
-        st.radio(
-            "Your answer was:",
-            question["answers"],
-            index=answer_info["selected_idx"],
-            disabled=True, 
-            key=f"q_{current_q_idx}_answered"
-        )
-
-        if answer_info["is_correct"]:
-            st.success("You answered: Correct! 🎉")
+        if is_skipped:
+            st.info("You skipped this question.")
+            # Options are disabled as no answer was selected
+            st.radio(
+                "Select your answer:",
+                question["answers"],
+                index=0, # Can set a default, but it's disabled anyway
+                disabled=True, 
+                key=f"q_{current_q_idx}_skipped_options"
+            )
         else:
-            st.error(f"You answered: Incorrect. Correct answer: {question['answers'][question['correctAnswer']]}")
+            st.radio(
+                "Your answer was:",
+                question["answers"],
+                index=answer_info["selected_idx"],
+                disabled=True, 
+                key=f"q_{current_q_idx}_answered"
+            )
+
+            if answer_info["is_correct"]:
+                st.success("You answered: Correct! 🎉")
+            else:
+                st.error(f"You answered: Incorrect. Correct answer: {question['answers'][question['correctAnswer']]}")
         
-        # ✅ This is where get_solution_link is always called for textual solutions
         with st.spinner("Searching for textual solution..."):
             txt_link = get_solution_link(question['question'])
 
         explanation_obj = question.get("explanation", {})
         if isinstance(explanation_obj, dict):
             detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
-            # Using st.info for the main explanation block can give it a distinct look
-            st.info(f"**Teacher's Explanation:**\n{detailed_steps}") # Keep st.info for main block, markdown renders inside
+            st.info(f"**Teacher's Explanation:**\n{detailed_steps}")
 
             yt_link = explanation_obj.get("youtube_link")
             if yt_link and yt_link.strip().lower() not in ["", "null"]:
@@ -527,30 +542,46 @@ def display_quiz():
             key=f"q_{current_q_idx}_options"
         )
 
-        if st.button("Submit Answer", key=f"submit_q_{current_q_idx}"):
-            selected_idx = options.index(selected_option)
-            is_correct = (selected_idx == question["correctAnswer"])
-            
-            st.session_state.answered_questions[current_q_idx] = {
-                "selected_idx": selected_idx,
-                "is_correct": is_correct
-            }
+        col_submit, col_skip = st.columns([1, 1]) # Use columns for buttons
+        
+        with col_submit:
+            if st.button("Submit Answer", key=f"submit_q_{current_q_idx}"):
+                selected_idx = options.index(selected_option)
+                is_correct = (selected_idx == question["correctAnswer"])
+                
+                st.session_state.answered_questions[current_q_idx] = {
+                    "selected_idx": selected_idx,
+                    "is_correct": is_correct,
+                    "is_skipped": False # Mark as not skipped
+                }
 
-            st.session_state.total_questions_solved += 1
-            if is_correct:
-                st.session_state.score += 1
-                st.session_state.total_correct_answers += 1
+                st.session_state.total_questions_solved += 1
+                if is_correct:
+                    st.session_state.score += 1
+                    st.session_state.total_correct_answers += 1
 
-            # Update topic-specific performance from quiz
-            quiz_main_topic = st.session_state.get("current_quiz_main_topic", "General") 
-            if quiz_main_topic not in st.session_state.topic_performance:
-                st.session_state.topic_performance[quiz_main_topic] = {"total_solved": 0, "correct_solved": 0}
-            
-            st.session_state.topic_performance[quiz_main_topic]["total_solved"] += 1
-            if is_correct:
-                st.session_state.topic_performance[quiz_main_topic]["correct_solved"] += 1
+                # Update topic-specific performance from quiz
+                quiz_main_topic = st.session_state.get("current_quiz_main_topic", "General") 
+                if quiz_main_topic not in st.session_state.topic_performance:
+                    st.session_state.topic_performance[quiz_main_topic] = {"total_solved": 0, "correct_solved": 0}
+                
+                st.session_state.topic_performance[quiz_main_topic]["total_solved"] += 1
+                if is_correct:
+                    st.session_state.topic_performance[quiz_main_topic]["correct_solved"] += 1
 
-            st.rerun() 
+                st.rerun() 
+        
+        with col_skip:
+            if st.button("Skip Question", key=f"skip_q_{current_q_idx}"):
+                # Mark as skipped
+                st.session_state.answered_questions[current_q_idx] = {
+                    "selected_idx": None, # No answer selected
+                    "is_correct": False, # Not correct
+                    "is_skipped": True # Explicitly mark as skipped
+                }
+                st.session_state.current_question += 1
+                st.rerun()
+
 
 def display_pdf_analyzer():
     """Display the PDF test results analyzer interface."""
