@@ -33,9 +33,8 @@ To get JEE Buddy up and running on your local machine, follow these steps:
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository_url_here>
+    git clone https://github.com/AyuAnchor/ai-learning-buddy.git
     cd ai-learning-buddy
-    cd Ai-Learning-Buddy
     ```
 
 2.  **Create a virtual environment (recommended):**
@@ -59,7 +58,7 @@ To get JEE Buddy up and running on your local machine, follow these steps:
 
 5.  **Run the application:**
     ```bash
-    streamlit run main.py # Assuming main.py is your primary execution file
+    streamlit run main.py
     ```
 
     The application will open in your web browser.

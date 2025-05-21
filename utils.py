@@ -3,11 +3,10 @@ import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from googlesearch import search
-from typing import List, Dict, Any
 import os
-from googleapiclient.discovery import build  # Add this import
+from googleapiclient.discovery import build
 load_dotenv()
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "your_youtube_api_key")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=YOUTUBE_API_KEY)
