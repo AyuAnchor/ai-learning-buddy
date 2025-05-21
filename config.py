@@ -6,11 +6,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-API_KEY = os.environ.get("GEMINI_API_KEY")
-genai.configure(api_key=API_KEY)
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 # YouTube API Configuration
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+try:
+    YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
+except:
+    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 
