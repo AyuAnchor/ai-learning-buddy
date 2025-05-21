@@ -9,11 +9,18 @@ from googlesearch import search
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-
+from googleapiclient.discovery import build  # Add this import
 load_dotenv()
 # Configuration
 API_KEY = os.environ.get("GEMINI_API_KEY", "your_api_key_here")
 genai.configure(api_key=API_KEY)
+
+
+# YouTube API Configuration
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "your_youtube_api_key")
+YOUTUBE_API_SERVICE_NAME = "youtube"
+YOUTUBE_API_VERSION = "v3"
+youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=YOUTUBE_API_KEY)
 
 # Initialize session state variables
 if "chat" not in st.session_state:
@@ -57,6 +64,38 @@ if "topic_performance" not in st.session_state:
 if "current_quiz_main_topic" not in st.session_state: # To store the topic of the currently active quiz
     st.session_state.current_quiz_main_topic = ""
 
+# New: For bookmarked questions
+if "bookmarked_questions" not in st.session_state:
+    st.session_state.bookmarked_questions = [] # Store bookmarked questions
+
+
+# function for youtube links
+@st.cache_data(ttl=3600)  # Cache results for 1 hour
+def get_youtube_links(topic: str, max_results=3):
+    """Search YouTube for educational content related to the topic."""
+    try:
+        search_response = youtube.search().list(
+            q=f"JEE {topic} tutorial",
+            part="id,snippet",
+            maxResults=max_results,
+            type="video",
+            relevanceLanguage="en",
+            safeSearch="strict"
+        ).execute()
+
+        videos = []
+        for item in search_response.get("items", []):
+            if item["id"]["kind"] == "youtube#video":
+                videos.append({
+                    "title": item["snippet"]["title"],
+                    "id": item["id"]["videoId"],
+                    "url": f"https://www.youtube.com/watch?v={item['id']['videoId']}"
+                })
+        return videos
+    except Exception as e:
+        st.error(f"YouTube API Error: {str(e)}")
+        return []
+
 
 def initialize_chat():
     """Initialize the Gemini chat model."""
@@ -99,6 +138,17 @@ def get_chatbot_response(message: str) -> str:
     if st.session_state.chat is None:
         st.session_state.chat = initialize_chat()
     
+    # Get detected topics
+    new_topics = process_message(message)
+    youtube_links = {}
+    
+    # Get YouTube links for detected topics
+    if new_topics:
+        for topic in new_topics:
+            videos = get_youtube_links(topic)
+            if videos:
+                youtube_links[topic] = videos[:2]  # Get top 2 videos per topic
+
     prompt = f"""
     You are a student support chatbot. The user is preparing for the Joint Entrance Exam (JEE).
     Please provide an appropriate response to their message: "{message}"
@@ -111,14 +161,23 @@ def get_chatbot_response(message: str) -> str:
     
     try:
         response = st.session_state.chat.send_message(prompt)
+        response_text = response.text
         
-        new_topics = process_message(message)
+        # Add YouTube links if available
+        if youtube_links:
+            response_text += "\n\n**Recommended Study Videos:**\n"
+            for topic, videos in youtube_links.items():
+                response_text += f"\n📺 **{topic.title()}**:\n"
+                for vid in videos:
+                    response_text += f"- [{vid['title']}]({vid['url']})\n"
+        
         st.session_state.weak_topics.update(new_topics)
+        return response_text
         
-        return response.text
     except Exception as e:
         st.error(f"Error generating chatbot response: {str(e)}")
         return "Sorry, something went wrong. Please try again later."
+    
 
 def generate_quiz(topic: str, difficulty: str, num_questions: int) -> List[Dict[str, Any]]:
     """Generate a quiz based on the specified topic, difficulty, number of questions, and weak topics."""
@@ -161,37 +220,52 @@ def generate_quiz(topic: str, difficulty: str, num_questions: int) -> List[Dict[
     Ensure all questions are appropriate for JEE level and the specified difficulty.
     Return ONLY valid JSON with no additional text or markdown formatting.
     """
-    
     try:
         response = model.generate_content(
             prompt,
-            generation_config={"temperature": 0.3} 
+            generation_config={"temperature": 0.3}
         )
         
         response_text = response.text
+        questions = []  # Initialize empty list first
         
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
-            
+        # Clean response text
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        
         json_start = response_text.find("[")
         json_end = response_text.rfind("]") + 1
         
         if json_start != -1 and json_end != -1 and json_end > json_start:
             json_text = response_text[json_start:json_end]
-            questions = json.loads(json_text)
+            try:
+                questions = json.loads(json_text)
+            except json.JSONDecodeError as je:
+                st.error(f"JSON Decode Error: {str(je)}")
+                return []
+        else:
+            st.error("Failed to find valid JSON array in response")
+            return []
+        
+        # Process questions and add solution links
+        if questions:
+            for question in questions:
+                # Pre-fetch textual solution link
+                with st.spinner(f"Preparing solutions for question {questions.index(question)+1}..."):
+                    question['txt_solution_link'] = get_solution_link(question['question'])
+                
+                # Ensure explanation structure exists
+                question.setdefault('explanation', {})
+                question['explanation'].setdefault('detailed_steps', 
+                    "Explanation not generated. Please refer to solution links.")
+                question['explanation'].setdefault('youtube_link', "")
+            
             return questions
         else:
-            st.error(f"Failed to parse quiz data. Raw response: {response_text}")
+            st.error("Generated quiz is empty")
             return []
             
-    except json.JSONDecodeError as je:
-        st.error(f"JSON Decode Error while generating quiz: {str(je)}. Raw response: {response_text}")
-        return []
     except Exception as e:
-        st.error(f"Error generating quiz: {str(e)}. Raw response: {response_text}")
+        st.error(f"Error generating quiz: {str(e)}")
         return []
 
 def extract_text_from_pdf(pdf_file):
@@ -205,6 +279,36 @@ def extract_text_from_pdf(pdf_file):
     except Exception as e:
         st.error(f"Error extracting text from PDF: {str(e)}")
         return ""
+    
+@st.cache_data(ttl=3600)  # Cache results for 1 hour
+def get_youtube_solution_link(jee_question, num_results=10):
+    """
+    Searches YouTube for a video solution of a given JEE question.
+    """
+    query = f"{jee_question} JEE solution site:youtube.com"
+
+    try:
+        for url in search(query, num_results=num_results):
+            if "youtube.com/watch" in url:
+                try:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    }
+                    response = requests.get(url, headers=headers, timeout=7)
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        page_text = soup.get_text().lower()
+                        return url
+                except requests.exceptions.Timeout:
+                    continue
+                except requests.exceptions.RequestException:
+                    continue
+                except Exception:
+                    continue
+    except Exception as e:
+        st.warning(f"Could not perform Youtube for solution: {e}")
+
+    return None  # No link found
 
 @st.cache_data(ttl=3600) # Cache the search results for an hour to reduce repeated calls
 def get_solution_link(jee_question, num_results=10):
@@ -404,7 +508,8 @@ def display_quiz():
 
     if current_q_idx >= len(questions):
         st.balloons()
-        st.success(f"🎉 Quiz Completed! Your score: {st.session_state.score}/{len(questions)} 🎉")
+        x= st.session_state.score / len(questions) * 100
+        st.success(f"🎉 Quiz Completed! Your score: {x}% 🎉")
         
         # Update streak history for today
         today = datetime.now().date()
@@ -431,8 +536,9 @@ def display_quiz():
             user_answer_idx = answer_info.get("selected_idx")
             is_correct = answer_info.get("is_correct", False)
             is_skipped = answer_info.get("is_skipped", False) # New: Check if skipped
+            is_bookmarked = answer_info.get("is_bookmarked", False) # Check if bookmarked
             
-            st.markdown(f"--- \n**Question {i+1}:**")
+            st.markdown(f"--- \n**Question {i+1}:** {' 🔖' if is_bookmarked else ''}")
             st.markdown(q_data['question']) # Display question using markdown
             
             if is_skipped:
@@ -446,6 +552,7 @@ def display_quiz():
 
             with st.spinner("Searching for solution..."):
                 txt_link = get_solution_link(q_data['question'])
+                yt_link = get_youtube_solution_link(q_data['question'])
 
             with st.expander("View Detailed Explanation"):
                 explanation_obj = q_data.get("explanation", {})
@@ -453,7 +560,6 @@ def display_quiz():
                     detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
                     st.markdown(f"**Teacher's Explanation:**\n{detailed_steps}") # Use markdown for steps
 
-                    yt_link = explanation_obj.get("youtube_link")
                     if yt_link and yt_link.strip().lower() not in ["", "null"]:
                         st.markdown(f"[📺 Watch on YouTube]({yt_link})")
                     else:
@@ -480,12 +586,85 @@ def display_quiz():
     
     st.subheader(f"Question {current_q_idx + 1} of {len(questions)}")
     st.markdown(f"**{question['question']}**") # Display question using markdown
+    
 
     if current_q_idx in st.session_state.answered_questions:
         answer_info = st.session_state.answered_questions[current_q_idx]
-        is_skipped = answer_info.get("is_skipped", False) # New: Check if skipped
+        is_skipped = answer_info.get("is_skipped", False) # Check if skipped
+        is_bookmarked = answer_info.get("is_bookmarked", False) # Check if bookmarked
         
-        if is_skipped:
+        # Display bookmark status 
+        col_bookmark = st.columns([1])[0]
+        with col_bookmark:
+            if st.button("🔖 " + ("Unbookmark" if is_bookmarked else "Bookmark") + " Question", key=f"bookmark_q_{current_q_idx}_answered"):
+                # Toggle bookmark status
+                answer_info["is_bookmarked"] = not is_bookmarked
+                st.session_state.answered_questions[current_q_idx] = answer_info
+                
+                # Update bookmarked questions list
+                question_with_meta = question.copy()
+                question_with_meta["quiz_topic"] = st.session_state.current_quiz_main_topic
+                question_with_meta["question_idx"] = current_q_idx
+                
+                if not is_bookmarked:  # If previously not bookmarked, add to bookmarks
+                    st.session_state.bookmarked_questions.append(question_with_meta)
+                else:  # If previously bookmarked, remove from bookmarks
+                    # Remove from bookmarked questions by filtering
+                    st.session_state.bookmarked_questions = [
+                        q for q in st.session_state.bookmarked_questions 
+                        if not (q.get("question") == question["question"] and 
+                                q.get("quiz_topic") == st.session_state.current_quiz_main_topic)
+                    ]
+                st.rerun()
+        
+        # The key issue starts here - need to handle the bookmarked-only case
+        if "selected_idx" not in answer_info and not is_skipped:
+            # This case handles when only bookmarked (no submit/skip yet)
+            options = question["answers"]
+            selected_option = st.radio(
+                "Select your answer:",
+                options,
+                key=f"q_{current_q_idx}_options"
+            )
+
+            col_submit, col_skip = st.columns([1, 1])
+            
+            with col_submit:
+                if st.button("Submit Answer", key=f"submit_q_{current_q_idx}_after_bookmark"):
+                    selected_idx = options.index(selected_option)
+                    is_correct = (selected_idx == question["correctAnswer"])
+                    
+                    answer_info["selected_idx"] = selected_idx
+                    answer_info["is_correct"] = is_correct
+                    answer_info["is_skipped"] = False
+                    st.session_state.answered_questions[current_q_idx] = answer_info
+
+                    st.session_state.total_questions_solved += 1
+                    if is_correct:
+                        st.session_state.score += 1
+                        st.session_state.total_correct_answers += 1
+
+                    # Update topic-specific performance from quiz
+                    quiz_main_topic = st.session_state.get("current_quiz_main_topic", "General") 
+                    if quiz_main_topic not in st.session_state.topic_performance:
+                        st.session_state.topic_performance[quiz_main_topic] = {"total_solved": 0, "correct_solved": 0}
+                    
+                    st.session_state.topic_performance[quiz_main_topic]["total_solved"] += 1
+                    if is_correct:
+                        st.session_state.topic_performance[quiz_main_topic]["correct_solved"] += 1
+
+                    st.rerun()
+            
+            with col_skip:
+                if st.button("Skip Question", key=f"skip_q_{current_q_idx}_after_bookmark"):
+                    answer_info["selected_idx"] = None
+                    answer_info["is_correct"] = False
+                    answer_info["is_skipped"] = True
+                    st.session_state.answered_questions[current_q_idx] = answer_info
+                    st.session_state.current_question += 1
+                    st.rerun()
+                    
+        elif is_skipped:
             st.info("You skipped this question.")
             # Options are disabled as no answer was selected
             st.radio(
@@ -509,31 +688,32 @@ def display_quiz():
             else:
                 st.error(f"You answered: Incorrect. Correct answer: {question['answers'][question['correctAnswer']]}")
         
-        with st.spinner("Searching for textual solution..."):
-            txt_link = get_solution_link(question['question'])
+        # Only show explanation if question was answered or skipped
+        if "selected_idx" in answer_info or is_skipped:
+            with st.spinner("Searching for textual solution..."):
+                txt_link = get_solution_link(question['question'])
+                yt_link = get_youtube_solution_link(question['question'])
 
-        explanation_obj = question.get("explanation", {})
-        if isinstance(explanation_obj, dict):
-            detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
-            st.info(f"**Teacher's Explanation:**\n{detailed_steps}")
+            explanation_obj = question.get("explanation", {})
+            if isinstance(explanation_obj, dict):
+                detailed_steps = explanation_obj.get('detailed_steps', 'Not provided.')
+                st.info(f"**Teacher's Explanation:**\n{detailed_steps}")
 
-            yt_link = explanation_obj.get("youtube_link")
-            if yt_link and yt_link.strip().lower() not in ["", "null"]:
-                st.markdown(f"[📺 Watch on YouTube]({yt_link})")
-            else:
-                st.info("No YouTube video link provided by the AI.")
-            
-            if txt_link:
-                st.markdown(f"[📖 View Textual Solution]({txt_link})")
-            else:
-                st.info("Could not find a textual solution link online for this question.")
-
-        else: 
-             st.info(f"**Explanation:**\n{explanation_obj}")
+                if yt_link and yt_link.strip().lower() not in ["", "null"]:
+                    st.markdown(f"[📺 Watch on YouTube]({yt_link})")
+                else:
+                    st.info("No YouTube video link provided by the AI.")
+                
+                if txt_link:
+                    st.markdown(f"[📖 View Textual Solution]({txt_link})")
+                else:
+                    st.info("Could not find a textual solution link online for this question.")
+            else: 
+                st.info(f"**Explanation:**\n{explanation_obj}")
         
-        if st.button("Next Question", key=f"next_q_{current_q_idx}"):
-            st.session_state.current_question += 1
-            st.rerun()
+            if st.button("Next Question", key=f"next_q_{current_q_idx}"):
+                st.session_state.current_question += 1
+                st.rerun()
     else:
         options = question["answers"]
         selected_option = st.radio(
@@ -542,17 +722,44 @@ def display_quiz():
             key=f"q_{current_q_idx}_options"
         )
 
-        col_submit, col_skip = st.columns([1, 1]) # Use columns for buttons
+        # Add bookmark button before submission
+        col_bookmark, col_submit, col_skip = st.columns([1, 1, 1]) # Use columns for buttons
+        
+        with col_bookmark:
+            if st.button("🔖 Bookmark Question", key=f"bookmark_q_{current_q_idx}"):
+                # We need to save a temporary record that this question is bookmarked
+                # even before the answer is submitted or skipped
+                if current_q_idx not in st.session_state.answered_questions:
+                    st.session_state.answered_questions[current_q_idx] = {
+                        "is_bookmarked": True
+                    }
+                else:
+                    st.session_state.answered_questions[current_q_idx]["is_bookmarked"] = True
+                
+                # Add to bookmarked questions
+                question_with_meta = question.copy()
+                question_with_meta["quiz_topic"] = st.session_state.current_quiz_main_topic
+                question_with_meta["question_idx"] = current_q_idx
+                st.session_state.bookmarked_questions.append(question_with_meta)
+                
+                st.success("Question bookmarked! You can view it later in your profile.")
+                st.rerun()
         
         with col_submit:
             if st.button("Submit Answer", key=f"submit_q_{current_q_idx}"):
                 selected_idx = options.index(selected_option)
                 is_correct = (selected_idx == question["correctAnswer"])
                 
+                # Check if the question is already marked as bookmarked
+                is_bookmarked = False
+                if current_q_idx in st.session_state.answered_questions:
+                    is_bookmarked = st.session_state.answered_questions[current_q_idx].get("is_bookmarked", False)
+                
                 st.session_state.answered_questions[current_q_idx] = {
                     "selected_idx": selected_idx,
                     "is_correct": is_correct,
-                    "is_skipped": False # Mark as not skipped
+                    "is_skipped": False, # Mark as not skipped
+                    "is_bookmarked": is_bookmarked # Preserve bookmark status
                 }
 
                 st.session_state.total_questions_solved += 1
@@ -573,15 +780,20 @@ def display_quiz():
         
         with col_skip:
             if st.button("Skip Question", key=f"skip_q_{current_q_idx}"):
+                # Check if the question is already marked as bookmarked
+                is_bookmarked = False
+                if current_q_idx in st.session_state.answered_questions:
+                    is_bookmarked = st.session_state.answered_questions[current_q_idx].get("is_bookmarked", False)
+                
                 # Mark as skipped
                 st.session_state.answered_questions[current_q_idx] = {
                     "selected_idx": None, # No answer selected
                     "is_correct": False, # Not correct
-                    "is_skipped": True # Explicitly mark as skipped
+                    "is_skipped": True, # Explicitly mark as skipped
+                    "is_bookmarked": is_bookmarked # Preserve bookmark status
                 }
                 st.session_state.current_question += 1
                 st.rerun()
-
 
 def display_pdf_analyzer():
     """Display the PDF test results analyzer interface."""
@@ -764,7 +976,39 @@ def display_profile():
     else:
         st.write("Start solving quizzes or analyzing tests to see topics you've covered!")
 
+    # ... (existing profile code)
 
+    st.markdown("---")
+    st.markdown("### 🔖 Saved Questions")
+    if st.session_state.bookmarked_questions:
+        for idx, question in enumerate(st.session_state.bookmarked_questions):
+            with st.expander(f"Bookmarked Question {idx+1} - {question.get('quiz_topic', 'General')}"):
+                st.markdown(f"**Question:** {question['question']}")
+                
+                # Show answer options if available
+                if 'answers' in question:
+                    st.markdown("**Options:**")
+                    for i, answer in enumerate(question['answers']):
+                        st.write(f"{i+1}. {answer}")
+                
+                # Show correct answer
+                if 'correctAnswer' in question:
+                    st.markdown(f"**Correct Answer:** {question['answers'][question['correctAnswer']]}")
+                
+                # Show explanation
+                if 'explanation' in question:
+                    st.markdown("**Explanation:**")
+                    explanation = question['explanation'].get('detailed_steps', 'No explanation available.')
+                    st.markdown(explanation)
+                
+                # Remove bookmark button
+                if st.button(f"Remove Bookmark {idx+1}", key=f"remove_bm_{idx}"):
+                    st.session_state.bookmarked_questions.remove(question)
+                    st.rerun()
+    else:
+        st.write("No questions bookmarked yet. Click the 📖 icon in quizzes to save questions here.")
+
+# ... (rest of existing profile code)
     st.markdown("---")
     st.markdown("### 🔥 Quiz Streak Chart")
     st.write("🟢: Quiz completed | ⚪: No quiz")
