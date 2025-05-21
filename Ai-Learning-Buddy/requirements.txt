@@ -1,0 +1,8 @@
+streamlit
+google-generativeai
+PyMuPDF
+python-dotenv
+googlesearch-python
+requests
+beautifulsoup4
+google-api-python-client
